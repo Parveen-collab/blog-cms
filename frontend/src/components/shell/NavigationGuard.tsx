@@ -6,10 +6,10 @@ import { useRouter } from "next/navigation";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 
 /*
- * Guards in-app navigation while a screen has unsaved changes. The App Router has
- * no route-change event to cancel, so every shell link goes through <GuardedLink>,
- * which asks first when a screen has called useBlockNavigation(true). Tab close
- * and reload are covered separately by useUnsavedChangesWarning.
+ * Guards in-app and browser history navigation while a screen has unsaved changes.
+ * In-app shell links go through <GuardedLink>, while browser back/forward history
+ * traversal (popstate) is intercepted in the capture phase. Tab close and reload
+ * are covered separately by useUnsavedChangesWarning.
  */
 
 interface NavigationGuardApi {
@@ -24,7 +24,26 @@ const NavigationGuardContext = createContext<NavigationGuardApi | null>(null);
 export function NavigationGuardProvider({ children }: { children: React.ReactNode }) {
   const router = useRouter();
   const blocked = useRef(false);
-  const [pendingHref, setPendingHref] = useState<string | null>(null);
+  const [pendingAction, setPendingAction] = useState<(() => void) | null>(null);
+
+  useEffect(() => {
+    const handlePopState = (event: PopStateEvent) => {
+      if (!blocked.current) return;
+
+      // Stop Next.js router from processing the popstate event and unmounting the screen
+      event.stopImmediatePropagation();
+
+      // Restore current location in history so the URL and history stack stay anchored
+      window.history.pushState(null, "", window.location.href);
+
+      setPendingAction(() => () => {
+        window.history.back();
+      });
+    };
+
+    window.addEventListener("popstate", handlePopState, { capture: true });
+    return () => window.removeEventListener("popstate", handlePopState, { capture: true });
+  }, []);
 
   const api = useMemo<NavigationGuardApi>(
     () => ({
@@ -33,7 +52,7 @@ export function NavigationGuardProvider({ children }: { children: React.ReactNod
       },
       isBlocked: () => blocked.current,
       navigate: (href) => {
-        if (blocked.current) setPendingHref(href);
+        if (blocked.current) setPendingAction(() => () => router.push(href));
         else router.push(href);
       },
     }),
@@ -43,16 +62,18 @@ export function NavigationGuardProvider({ children }: { children: React.ReactNod
   return (
     <NavigationGuardContext.Provider value={api}>
       {children}
-      {pendingHref && (
+      {pendingAction && (
         <ConfirmDialog
           title="Discard unsaved changes?"
           message="You have changes that haven’t been saved. Leave anyway?"
           confirmLabel="Discard changes"
           danger
-          onClose={() => setPendingHref(null)}
+          onClose={() => setPendingAction(null)}
           onConfirm={() => {
             blocked.current = false;
-            router.push(pendingHref);
+            const action = pendingAction;
+            setPendingAction(null);
+            action();
           }}
         />
       )}
