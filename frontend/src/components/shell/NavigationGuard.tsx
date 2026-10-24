@@ -2,14 +2,14 @@
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 
 /*
  * Guards in-app and browser history navigation while a screen has unsaved changes.
  * In-app shell links go through <GuardedLink>, while browser back/forward history
- * traversal (popstate) is intercepted in the capture phase. Tab close and reload
- * are covered separately by useUnsavedChangesWarning.
+ * traversal (popstate) is intercepted by this root provider before child router
+ * listeners run. Tab close and reload are covered separately by useUnsavedChangesWarning.
  */
 
 interface NavigationGuardApi {
@@ -23,8 +23,14 @@ const NavigationGuardContext = createContext<NavigationGuardApi | null>(null);
 
 export function NavigationGuardProvider({ children }: { children: React.ReactNode }) {
   const router = useRouter();
+  const pathname = usePathname();
   const blocked = useRef(false);
+  const currentHref = useRef("");
   const [pendingAction, setPendingAction] = useState<(() => void) | null>(null);
+
+  useEffect(() => {
+    currentHref.current = window.location.href;
+  }, [pathname]);
 
   useEffect(() => {
     const handlePopState = (event: PopStateEvent) => {
@@ -33,26 +39,30 @@ export function NavigationGuardProvider({ children }: { children: React.ReactNod
       // Stop Next.js router from processing the popstate event and unmounting the screen
       event.stopImmediatePropagation();
 
-      // Restore current location in history so the URL and history stack stay anchored
-      window.history.pushState(null, "", window.location.href);
+      // Restore blocked screen's URL in history so the address bar and state stay in sync
+      if (currentHref.current) {
+        window.history.pushState(null, "", currentHref.current);
+      }
 
-      setPendingAction(() => () => {
-        window.history.back();
-      });
+      // Preserve an already-pending navigation (e.g. GuardedLink clicked before Back button)
+      setPendingAction((existing) => existing ?? (() => window.history.back()));
     };
 
-    window.addEventListener("popstate", handlePopState, { capture: true });
-    return () => window.removeEventListener("popstate", handlePopState, { capture: true });
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
   }, []);
 
   const api = useMemo<NavigationGuardApi>(
     () => ({
       setBlocked: (value) => {
         blocked.current = value;
+        if (value && typeof window !== "undefined") {
+          currentHref.current = window.location.href;
+        }
       },
       isBlocked: () => blocked.current,
       navigate: (href) => {
-        if (blocked.current) setPendingAction(() => () => router.push(href));
+        if (blocked.current) setPendingAction((existing) => existing ?? (() => router.push(href)));
         else router.push(href);
       },
     }),
